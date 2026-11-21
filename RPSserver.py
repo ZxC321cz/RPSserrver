@@ -16,6 +16,7 @@ beats = {
     "paper": "rock",
     "scissors": "paper"
 }
+
 def game(choices: dict[str, str]) -> list[str]:
 
     unique_moves = set(choices.values())
@@ -27,22 +28,43 @@ def game(choices: dict[str, str]) -> list[str]:
 
     if beats[move_a] == move_b:
         winning_move = move_a
+
     elif beats[move_b] == move_a:
         winning_move = move_b
     
     winners = []
+
     for player, move in choices.items():
         if move == winning_move:
             winners.append(player)
     return winners
 
-def set_value(client_socket, nickname: str, data: str,) -> bool:
-    if data.strip().lower() != ("rock" or "paper" or "scissors"):
-        client_socket.send("Wrong input, enter right object: ".encode())
-    else:
-        temp_dict: dict[str, str] = {}
-        temp_dict[nickname.values()] = data
+def menu(client_socket, nickname: str) -> bool:
+    data = client_socket.recv(1024).decode()
+    if data == "/start":
+        global counter1
+        counter1 += 1
+        print(counter1)
+
+        if counter1 >= 3:
+
+            while True:
+                client_socket.send("Choose rock, paper or scissors ".encode())
+                data = client_socket.recv(1024).decode()
+
+                if data.strip().lower() != ("rock" or "paper" or "scissors"):
+                    client_socket.send("Wrong input, enter right object: ".encode())
+
+                else:
+                    temp_dict: dict[str, str] = {}
+                    temp_dict[nickname.values()] = data
+                    break
+
+    elif not data or data == "/exit":
         return True
+    
+    else:
+        print(f"{players[client_socket]}: {data}")
 
 
 def handle_client(client_socket, address):
@@ -50,34 +72,22 @@ def handle_client(client_socket, address):
     client_socket.send("Enter nickname! ".encode())
     players[client_socket] = client_socket.recv(1024).decode()
 
-    while True:
-        try:
-            data = client_socket.recv(1024).decode()
-            if not data or data == "/exit":
+    try:
+        while True:
+            move = menu(client_socket, players[client_socket])
+            if move:
                 break
-            print(f"{players[client_socket]}: {data}")
-            if data == "/start":
-                global counter1
-                counter1 += 1
-                print(counter1)
-                if counter1 >= 3:
-                    while True:
-                        client_socket.send("Choose rock, paper or scissors ".encode())
-                        data = client_socket.recv(1024).decode()
-                        set_value(client_socket, players[client_socket], data)
-                        if set_value == True:
-                            break
-        except:
-            break
+            
 
-    print(f"[DISCONNECTED] {address}")
-    players.pop(client_socket)
-    client_socket.close()
+    finally:
+        print(f"[DISCONNECTED] {address}")
+        players.pop(client_socket)
+        client_socket.close()
 
 def start_server():
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.bind((SERVER_IP, PORT))
-    server_socket.listen()
+    server_socket.listen(50)
 
     print(f"[SERVER STARTED] Listening on {SERVER_IP}:{PORT}")
 
@@ -92,7 +102,3 @@ def start_server():
         if counter1 >= 3:
             break
     game()
-
-
-
-start_server()
