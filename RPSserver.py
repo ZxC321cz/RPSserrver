@@ -15,8 +15,7 @@ class ServerGameCoordinator:
         self.ready_players: set[str]
         self.countdown_started: bool
         self.game_started: bool
-        self.lock = threading.Lock()
-        self.counter1 = 0 
+        self.lock = threading.Lock() 
         self.beats = {
             "rock": "scissors",
             "paper": "rock",
@@ -43,21 +42,7 @@ class ServerGameCoordinator:
                     client_socket.sendall("Nickname has already exist, enter another!\n ".encode())
                     continue
                 self.players[client_socket] = nick
-                return True
-
-
-    def menu(self, client_socket) -> bool:
-        data = client_socket.recv(1024)
-        if data.decode() == "/start":
-            with self.lock:
-                self.ready_players.add()
-
-
-        elif not data or data.decode() == "/exit":
-            return True
-        
-        else:
-            print(f"{self.players[client_socket]}: {data}")
+                return nick
 
 
     def notify_players(self, message):
@@ -156,7 +141,7 @@ class ServerGameCoordinator:
         return self.game(choices)
 
 
-    def play_match(self):
+    def play_match(self) -> str:
         round_num = 1
 
         while True:
@@ -187,30 +172,37 @@ class ServerGameCoordinator:
                     except OSError:
                         pass
                     try:
+                        print(f"[DISCONNECTED] {nick}")
                         sock.close()
                     except OSError:
                         pass
             
             round_num += 1
 
+    def menu(self, client_socket, nick) -> bool:
+            data = client_socket.recv(1024)
+            if data.decode() == "/start":
+                with self.lock:
+                    self.ready_players.add(nick)
 
-    def handle_client(self, client_socket, address):
-        print(f"[NEW CONNECTION] {address} connected.")
-        
 
-        try:
-            if not self.register_nickname(client_socket):
-                return
-            while True:
-                move = self.menu(client_socket, self.players[client_socket])
-                if move:
-                    break
+            elif not data or data.decode() == "/exit":
+                return True
+            
+            else:
+                print(f"{self.players[client_socket]}: {data}")
+
                 
+    def handle_client(self, client_socket, address):
+        self.address = address
+        print(f"[NEW CONNECTION] {address} connected.")
+        nick = self.register_nickname(client_socket)
+        if not nick:
+            return
+        move = self.menu(client_socket, nick)
+        if move: pass
 
-        finally:
-            print(f"[DISCONNECTED] {address}")
-            self.players.pop(client_socket)
-            client_socket.close()
+
 
 
     def start_server(self):
