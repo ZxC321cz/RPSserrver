@@ -38,16 +38,24 @@ def main():
 
     stop_event = threading.Event()
 
-    t_recv = threading.Thread(target=recieving, args=(client_socket, stop_event))
-    t_send = threading.Thread(target=sending, args=(client_socket, stop_event))
+    t_recv = threading.Thread(target=recieving, args=(client_socket, stop_event), daemon=True)
+    t_send = threading.Thread(target=sending, args=(client_socket, stop_event), daemon=True)
     t_recv.start()
     t_send.start()
 
     try:
         while not stop_event.is_set():
             stop_event.wait(timeout=0.2)
+    except KeyboardInterrupt:
+        stop_event.set()
     finally:
         stop_event.set()
-        client_socket.close()
-        os.exit(0)
+        try:
+            client_socket.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            client_socket.close()
+        except OSError:
+            pass
 main()

@@ -1,43 +1,42 @@
 import socket
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-
-# Server IP and PORT
 VALID_MOVES = {"rock", "paper", "scissors"}
 MIN_PLAYERS = 2
 START_TIMEOUT = 15.0
 
 
-# List of connected clients
 class ServerGameCoordinator:
     def __init__(self, SERVER_IP: str = "0.0.0.0", PORT: int = 8080):
 
         self.SERVER_IP = SERVER_IP
         self.PORT = PORT
 
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM) # Server configs
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) # For port reuse
         
-        self.players: dict[socket.socket, str] = {}
+        self.players: dict[socket.socket, str] = {} # dict of connected players(to validate all operations with clients)
 
-        self.ready_players: set[str] = set()
+        self.ready_players: set[str] = set() # players, which ready to play
 
-        self.lobby_deadline: float | None = None
-        self.last_reminder: dict[socket.socket, float] = {}
+        self.lobby_deadline: float | None = None # timer
+        self.last_reminder: dict[socket.socket, float] = {} # reminder to use commands for players
         
-        self.beats = {
-            "rock": "scissors",
-            "paper": "rock",
-            "scissors": "paper"
-        }
+        self.beats = {                      #
+            "rock": "scissors",             #
+            "paper": "rock",                # dict of rules
+            "scissors": "paper"             #
+        }                                   #
 
-        self.lock = threading.Lock()
+        self.lock = threading.Lock()        # locker for threads, don't allow to access 1 data for several threads
 
-        self.game_started = threading.Event()
-        self.game_finished = threading.Event()
+        self.game_started = threading.Event()   # flag for start 
+        self.game_finished = threading.Event()  # flag for finish
 
     def register_nickname(self, client_socket: socket.socket) -> bool:
+        # Nick registration(recieving, validating and adding to dict)
         while True:
             client_socket.sendall("Enter nickname!\n ".encode())
             raw_nick = client_socket.recv(1024)
@@ -60,6 +59,7 @@ class ServerGameCoordinator:
 
 
     def notify_players(self, message):
+        # Text to all
         with self.lock:
             sockets = list(self.players.keys()) # To avoid idling
 
@@ -75,28 +75,82 @@ class ServerGameCoordinator:
                     pass
 
 
-    def ask_player_move(self, client_socket):
+    def ask_player_move(self, client_socket: socket.socket) -> str | None:
+        # Function, that collect move from each player
+        try:
+            client_socket.settimeout(None)
+        except OSError:
+            return None
+
         while True:
             try:
                 client_socket.sendall("Choose rock, paper or scissors:\n".encode())
                 move = client_socket.recv(1024)
-                cleaned_move = move.decode().strip().lower()
             except OSError:
                 return None
-            
+
             if not move:
                 return None
-            
+
+            cleaned_move = move.decode(errors="ignore").strip().lower()
+
             if cleaned_move not in {"rock", "paper", "scissors"}:
                 try:
-                    client_socket.sendall("Wrong input, choose rock, paper or scissors:\n".encode())
+                    client_socket.sendall(
+                        "Wrong input, choose rock, paper or scissors:\n".encode()
+                    )
                 except OSError:
                     return None
                 continue
+
             return cleaned_move
 
 
+    def _collect_move_for_player(self, sock: socket.socket, nick: str) -> tuple[socket.socket, str, str | None]:
+        # Helper function
+        move = self.ask_player_move(sock)
+        return sock, nick, move
+    
+    
+    def round(self, round_num: int) -> list[str]:
+        # Initializing the round
+        with self.lock:
+            players_snapshot = list(self.players.items())
+
+        if len(players_snapshot) < 2:
+            return [nick for _, nick in players_snapshot]
+
+        self.notify_players(f"Round {round_num} started!\n")
+        choices: dict[str, str] = {}
+
+        with ThreadPoolExecutor(max_workers=len(players_snapshot)) as executor: # using concurrent.futures module to provide simultanious text to all users, because with.lock blocks other threads
+            if self.game_finished.is_set():
+                return []
+            futures = [
+                executor.submit(self._collect_move_for_player, sock, nick)
+                for sock, nick in players_snapshot
+            ]
+            for future in as_completed(futures):
+                sock, nick, move = future.result()
+                if move is None:
+                    with self.lock:
+                        self.players.pop(sock, None)
+                        self.ready_players.discard(sock)
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+                    continue
+                choices[nick] = move
+
+        if len(choices) < 2:
+            return list(choices.keys())
+
+        return self.game(choices)
+
+
     def game(self, choices: dict[str, str]) -> list[str]:
+        # Winners determinant
         unique_moves = set(choices.values())
 
         if len(unique_moves) != 2:
@@ -118,35 +172,8 @@ class ServerGameCoordinator:
         return winners
 
 
-    def round(self, round_num: int) -> list[str]:
-        with self.lock:
-            players_snapshot = list(self.players.items())
-        
-        if len(players_snapshot) < 2:
-            return [nick for sock, nick in players_snapshot]
-    
-        self.notify_players(f"Round {round_num} started!]\n")
-        choices: dict[str, str] = {}
-
-        for sock, nick in players_snapshot:
-            move = self.ask_player_move(sock)
-            if move is None:
-                with self.lock:
-                    self.players.pop(sock, None)
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-                continue
-            choices[nick] = move
-
-        if len(choices) < 2:
-            return list(choices.keys())
-        
-        return self.game(choices)
-
-
     def play_match(self) -> str:
+        # Sequential playing of rounds
         round_num = 1
         try:
             while True:
@@ -187,6 +214,7 @@ class ServerGameCoordinator:
             self.game_finished.set()
 
     def _remind_unready_player(self, client_socket, now: float) -> bool:
+        # Reminder for unready players. Text to each player
         data: str | None = None
         with self.lock:
             if (client_socket not in self.players or client_socket in self.ready_players):
@@ -212,12 +240,14 @@ class ServerGameCoordinator:
 
 
     def _stop_accepting(self) -> None:
+        # Stops accepting the clients
         try:
             self.server_socket.close()
         except OSError:
             pass
 
     def menu(self, client_socket) -> bool:
+        # Main logic for game menu, where players can use commands: /start, /exit
         prev_timeout = client_socket.gettimeout()
         client_socket.settimeout(1.0)
         try:
@@ -376,6 +406,9 @@ class ServerGameCoordinator:
                 thread.start()
 
                 print(f"[ACTIVE CONNECTIONS] {threading.active_count() - 1}")
+
+            if self.game_started.is_set():
+                self.game_finished.wait()
         finally:
             try:
                 self.server_socket.close()
