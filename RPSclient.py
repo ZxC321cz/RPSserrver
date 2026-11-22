@@ -1,5 +1,6 @@
 import socket
 import threading
+import os 
 
 SERVER_IP = "192.168.0.153"   # CHANGE IT TO SERVER's IP
 PORT = 8080
@@ -37,8 +38,8 @@ def main():
 
     stop_event = threading.Event()
 
-    t_recv = threading.Thread(target=recieving, args=(client_socket, stop_event), daemon=True)
-    t_send = threading.Thread(target=sending, args=(client_socket, stop_event), daemon=True)
+    t_recv = threading.Thread(target=recieving, args=(client_socket, stop_event))
+    t_send = threading.Thread(target=sending, args=(client_socket, stop_event))
     t_recv.start()
     t_send.start()
 
@@ -47,5 +48,6 @@ def main():
             stop_event.wait(timeout=0.2)
     finally:
         stop_event.set()
-
+        client_socket.close()
+        os.exit(0)
 main()

@@ -19,9 +19,9 @@ class ServerGameCoordinator:
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
-        self.players: dict[socket.socket, str]
+        self.players: dict[socket.socket, str] = {}
 
-        self.ready_players: set[str]
+        self.ready_players: set[str] = set()
 
         self.lobby_deadline: float | None = None
         self.last_reminder: dict[socket.socket, float] = {}
@@ -45,7 +45,7 @@ class ServerGameCoordinator:
             if not raw_nick:
                 return None
             
-            nick = raw_nick.decode()
+            nick = raw_nick.decode().strip()
 
             if not nick:
                 client_socket.sendall("Nickname can't be empty!\n ".encode())
@@ -80,19 +80,20 @@ class ServerGameCoordinator:
             try:
                 client_socket.sendall("Choose rock, paper or scissors:\n".encode())
                 move = client_socket.recv(1024)
+                cleaned_move = move.decode().strip().lower()
             except OSError:
                 return None
             
             if not move:
                 return None
             
-            if move.decode().strip().lower() not in {"rock", "paper", "scissors"}:
+            if cleaned_move not in {"rock", "paper", "scissors"}:
                 try:
                     client_socket.sendall("Wrong input, choose rock, paper or scissors:\n".encode())
                 except OSError:
                     return None
                 continue
-            return move
+            return cleaned_move
 
 
     def game(self, choices: dict[str, str]) -> list[str]:
@@ -124,7 +125,7 @@ class ServerGameCoordinator:
         if len(players_snapshot) < 2:
             return [nick for sock, nick in players_snapshot]
     
-        self.notify_players(f"Round {round_num} started!")
+        self.notify_players(f"Round {round_num} started!]\n")
         choices: dict[str, str] = {}
 
         for sock, nick in players_snapshot:
@@ -156,7 +157,7 @@ class ServerGameCoordinator:
                     return None
                 
                 if len(players_snapshot) == 1:
-                    winner_nick = players_snapshot[0]
+                    _, winner_nick = players_snapshot[0]
                     self.notify_players(f"Winner: {winner_nick}")
                     return winner_nick
                 
@@ -201,6 +202,7 @@ class ServerGameCoordinator:
                 data = f"still waiting for /start ({left}s left)\n"
             else:
                 data = "Still waiting for /start\n"
+                time.sleep(5)
 
         try:
             client_socket.sendall(data.encode())
@@ -281,7 +283,7 @@ class ServerGameCoordinator:
                         self.game_started.set()
                         should_start = True
 
-                self.notify_players(f"{ready}/{total}")
+                self.notify_players(f"Ready: {ready}/{total}.\n")
                 if should_start:
                     self._stop_accepting()
                     self.play_match()
@@ -370,7 +372,7 @@ class ServerGameCoordinator:
                         pass
                     break
 
-                thread = threading.Thread(target=self.handle_client, args=(client_socket, address), daemon=True)
+                thread = threading.Thread(target=self.handle_client, args=(client_socket, address))
                 thread.start()
 
                 print(f"[ACTIVE CONNECTIONS] {threading.active_count() - 1}")
