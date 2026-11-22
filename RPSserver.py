@@ -4,24 +4,38 @@ import time
 
 
 # Server IP and PORT
-SERVER_IP = "0.0.0.0"  # Listen all players
-PORT = 8080
+VALID_MOVES = {"rock", "paper", "scissors"}
+MIN_PLAYERS = 2
+START_TIMEOUT = 15.0
 
 
 # List of connected clients
 class ServerGameCoordinator:
-    def __init__(self):
+    def __init__(self, SERVER_IP: str = "0.0.0.0", PORT: int = 8080):
+
+        self.SERVER_IP = SERVER_IP
+        self.PORT = PORT
+
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
         self.players: dict[socket.socket, str]
+
         self.ready_players: set[str]
-        self.countdown_started: bool
-        self.game_started: bool
-        self.lock = threading.Lock() 
+
+        self.lobby_deadline: float | None = None
+        self.last_reminder: dict[socket.socket, float] = {}
+        
         self.beats = {
             "rock": "scissors",
             "paper": "rock",
             "scissors": "paper"
         }
 
+        self.lock = threading.Lock()
+
+        self.game_started = threading.Event()
+        self.game_finished = threading.Event()
 
     def register_nickname(self, client_socket: socket.socket) -> bool:
         while True:
@@ -59,16 +73,6 @@ class ServerGameCoordinator:
                     sock.close()
                 except OSError:
                     pass
-
-
-    def game_coordinator(self, state, lock):
-        pass
-        while True:
-            # is_over = round_step(round_num, state["clients"], lock)
-            # if is_over:
-            #     break
-            round
-
 
 
     def ask_player_move(self, client_socket):
@@ -143,83 +147,238 @@ class ServerGameCoordinator:
 
     def play_match(self) -> str:
         round_num = 1
-
-        while True:
-            with self.lock:
-                players_snapshot = list(self.players.items())
-            
-            if len(players_snapshot) == 0:
-                return None
-            
-            if len(players_snapshot) == 1:
-                winner_nick = players_snapshot[0]
-                self.notify_players(f"Winner: {winner_nick}")
-                return winner_nick
-            
-            winners = self.round(round_num)
-
-            if not winners:
-                self.notify_players("Draw! Replaying round...")
-                continue
-            
-            winner_set = set(winners)
-            for sock, nick in players_snapshot:
-                if nick not in winner_set:
-                    with self.lock:
-                        self.players.pop(sock, None)
-                    try:
-                        sock.sendall("You were eliminated!\n".encode())
-                    except OSError:
-                        pass
-                    try:
-                        print(f"[DISCONNECTED] {nick}")
-                        sock.close()
-                    except OSError:
-                        pass
-            
-            round_num += 1
-
-    def menu(self, client_socket, nick) -> bool:
-            data = client_socket.recv(1024)
-            if data.decode() == "/start":
+        try:
+            while True:
                 with self.lock:
-                    self.ready_players.add(nick)
+                    players_snapshot = list(self.players.items())
+                
+                if len(players_snapshot) == 0:
+                    return None
+                
+                if len(players_snapshot) == 1:
+                    winner_nick = players_snapshot[0]
+                    self.notify_players(f"Winner: {winner_nick}")
+                    return winner_nick
+                
+                winners = self.round(round_num)
 
+                if not winners:
+                    self.notify_players("Draw! Replaying round...")
+                    continue
+                
+                winner_set = set(winners)
+                for sock, nick in players_snapshot:
+                    if nick not in winner_set:
+                        with self.lock:
+                            self.players.pop(sock, None)
+                        try:
+                            sock.sendall("You were eliminated!\n".encode())
+                        except OSError:
+                            pass
+                        try:
+                            print(f"[DISCONNECTED] {nick}")
+                            sock.close()
+                        except OSError:
+                            pass
+                
+                round_num += 1
+        finally:
+            self.game_finished.set()
 
-            elif not data or data.decode() == "/exit":
+    def _remind_unready_player(self, client_socket, now: float) -> bool:
+        data: str | None = None
+        with self.lock:
+            if (client_socket not in self.players or client_socket in self.ready_players):
                 return True
             
+            last = self.last_reminder.get(client_socket, 0.0)
+            if now - last < 1.0:
+                return True
+            
+            self.last_reminder[client_socket] = now
+            if self.lobby_deadline is not None:
+                left = max(0, int(self.lobby_deadline - now))
+                data = f"still waiting for /start ({left}s left)\n"
             else:
-                print(f"{self.players[client_socket]}: {data}")
+                data = "Still waiting for /start\n"
 
+        try:
+            client_socket.sendall(data.encode())
+            return True
+        except OSError:
+            return False
+
+
+    def _stop_accepting(self) -> None:
+        try:
+            self.server_socket.close()
+        except OSError:
+            pass
+
+    def menu(self, client_socket) -> bool:
+        prev_timeout = client_socket.gettimeout()
+        client_socket.settimeout(1.0)
+        try:
+            try:
+                client_socket.sendall("Type /start when ready:\n".encode())
+            except OSError:
+                return False
+            
+            while not self.game_started.is_set():
+                now = time.monotonic()
+
+                if self.lobby_deadline is not None and now >= self.lobby_deadline:
+                    self._kick_unready_players()
+                    with self.lock:
+                        if client_socket not in self.players:
+                            return False
+                        total = len(self.players)
+                        ready = len(self.ready_players)
+                        should_start = (total >= MIN_PLAYERS and ready >= total and not self.game_started.is_set())
+
+                        if should_start:
+                            self.game_started.set()
+
+                    if should_start:
+                        self.notify_players(f"Ready: {ready}/{total}. Starting match!\n")
+                        self._stop_accepting()
+                        self.play_match()
+                        return True
+                if not self._remind_unready_player(client_socket, now):
+                    return False
                 
+                try:
+                    data = client_socket.recv(1024)
+                except TimeoutError:
+                    continue
+                except OSError:
+                    return False
+            
+                if not data or data.decode().strip() == "/exit":
+                    return False
+            
+                elif data.decode().strip() != "/start":
+                    try:
+                        client_socket.sendall("Unknown command. \n".encode())
+                    except OSError:
+                        return False
+                    continue
+
+                should_start = False
+                with self.lock:
+                    if client_socket not in self.players:
+                        return False
+                    self.ready_players.add(client_socket)
+                    self.last_reminder.pop(client_socket, None)
+
+                    total = len(self.players)
+                    ready = len(self.ready_players)
+
+                    if (total >= MIN_PLAYERS and self.lobby_deadline is None):
+                        self.lobby_deadline = time.monotonic() + START_TIMEOUT
+                    
+                    if (total >= MIN_PLAYERS and ready >= total and not self.game_started.is_set()):
+                        self.game_started.set()
+                        should_start = True
+
+                self.notify_players(f"{ready}/{total}")
+                if should_start:
+                    self._stop_accepting()
+                    self.play_match()
+                    
+                    return True
+                return True
+        finally:
+            with self.lock:
+                self.last_reminder.pop(client_socket, None)
+            try:
+                client_socket.settimeout(prev_timeout)
+            except OSError:
+                pass
+                
+                
+    def _kick_unready_players(self) -> None:
+        with self.lock:
+            players_snapshot = list(self.players.items())
+            unready = [
+                (sock, nick)
+                for sock, nick in players_snapshot
+                if sock not in self.ready_sockets
+            ]
+            for sock, nick in unready:
+                self.players.pop(sock, None)
+                self.ready_sockets.discard(sock)
+                self.lobby_deadline = None
+
+        for sock, nick in unready:
+            try:
+                sock.sendall("Kicked: too slow to type /start.\n".encode())
+                sock.close()
+            except OSError:
+                pass
+
     def handle_client(self, client_socket, address):
-        self.address = address
         print(f"[NEW CONNECTION] {address} connected.")
-        nick = self.register_nickname(client_socket)
-        if not nick:
-            return
-        move = self.menu(client_socket, nick)
-        if move: pass
+        try:
+            nick = self.register_nickname(client_socket)
+            if not nick:
+                return
+            ready_ok = self.menu(client_socket)
+            if not ready_ok: 
+                return
+            
+            self.game_started.wait()
 
-
+            while not self.game_finished.is_set():
+                with self.lock:
+                    if client_socket not in self.players:
+                        break
+                self.game_finished.wait(timeout=0.5)
+        except OSError as error:
+            print(f"[CONNECTION ERROR] {address}: {error}")
+        finally:
+            print(f"[DISCONNECTED] {address}")
+            with self.lock:
+                self.players.pop(client_socket, None)
+                self.ready_players.discard(client_socket)
+                self.last_reminder.pop(client_socket, None)
+            try:
+                client_socket.close()
+            except OSError:
+                pass
 
 
     def start_server(self):
-        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_socket.bind((SERVER_IP, PORT))
-        server_socket.listen(50)
+        self.server_socket.bind((self.SERVER_IP, self.PORT))
+        self.server_socket.listen(50)
 
-        print(f"[SERVER STARTED] Listening on {SERVER_IP}:{PORT}")
+        print(f"[SERVER STARTED] Listening on {self.SERVER_IP}:{self.PORT}")
+        
+        try:
+            while not self.game_started.is_set():
+                try:
+                    client_socket, address = self.server_socket.accept()
+                except OSError:
+                    if self.game_started.is_set():
+                        break
+                    continue
 
-        while True:
-            client_socket, address = server_socket.accept()
+                if self.game_started.is_set():
+                    try:
+                        client_socket.close()
+                    except OSError:
+                        pass
+                    break
 
-            thread = threading.Thread(target=self.handle_client, args=(client_socket, address))
-            thread.start()
+                thread = threading.Thread(target=self.handle_client, args=(client_socket, address), daemon=True)
+                thread.start()
 
-            print(f"[ACTIVE CONNECTIONS] {threading.active_count() - 1}")
+                print(f"[ACTIVE CONNECTIONS] {threading.active_count() - 1}")
+        finally:
+            try:
+                self.server_socket.close()
+            except OSError:
+                pass
 
-            if self.counter1 >= 3:
-                break
-        self.game()
+game_server = ServerGameCoordinator()
+game_server.start_server()
