@@ -2,7 +2,7 @@ import socket
 import threading
 import os 
 
-SERVER_IP = "192.168.0.153"   # CHANGE IT TO SERVER's IP
+SERVER_IP = "0.0.0.0"   # CHANGE IT TO SERVER's IP
 PORT = 8080
 
 
